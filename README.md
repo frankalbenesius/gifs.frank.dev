@@ -6,7 +6,7 @@ Run locally with `python3 -m http.server 8765`, then open <http://localhost:8765
 
 The three encoder scripts in `lib/` came from the previous `gifs.frank.dev` deployment. They are from [jsgif](https://github.com/antimatter15/jsgif); its MIT license is in `lib/LICENSE`.
 
-The site is served by Caddy from `/opt/homelab/sites/gifs`. Deploy the repository's static files with:
+The site is served by Caddy from `/opt/homelab/sites/gifs`. Pushes to `main` deploy there automatically through the shared `homelab-deploy` workflow. To deploy manually:
 
 ```sh
 rsync -av --delete --exclude='.git' --exclude='README.md' ./ homelab:/opt/homelab/sites/gifs/
