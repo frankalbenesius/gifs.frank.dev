@@ -1,0 +1,17 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    uses: frankalbenesius/homelab-deploy/.github/workflows/static-site.yml@main
+    with:
+      site-name: gifs
+      build: false
+      dist-dir: "."
+    secrets:
+      SSH_KEY: ${{ secrets.HOMELAB_DEPLOY_SSH_KEY }}
+      KNOWN_HOSTS: ${{ secrets.HOMELAB_KNOWN_HOSTS }}
