@@ -79,15 +79,15 @@ export async function api<T>(
 
 export async function loadSession(): Promise<{
   user: User | null;
-  emailConfigured: boolean;
+  signInConfigured: boolean;
 }> {
   const result = await api<{
     user: User | null;
     csrf: string;
-    emailConfigured: boolean;
+    signInConfigured: boolean;
   }>("/api/session");
   csrfToken = result.csrf;
-  return { user: result.user, emailConfigured: result.emailConfigured };
+  return { user: result.user, signInConfigured: result.signInConfigured };
 }
 
 export function jsonRequest(

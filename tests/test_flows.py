@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from PIL import Image
@@ -98,6 +99,29 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(owner.delete(f"/api/gifs/{gif['id']}").status_code, 403)
         self.assertEqual(owner.delete(f"/api/gifs/{gif['id']}", headers=headers).status_code, 200)
         self.assertEqual(owner.get(gif["fileUrl"]).status_code, 404)
+
+    def test_shared_sign_in_keeps_existing_gifs(self):
+        owner, headers, existing = self.account("linked@example.com", "Linked")
+        response = owner.post("/api/gifs", data={"file": (sample_gif(), "linked.gif"), "uploadKey": "linked-upload", "tags": "[]", "groupIds": "[]"}, headers=headers)
+        self.assertEqual(response.status_code, 201, response.json)
+        gif_id = response.json["gif"]["id"]
+
+        class IdentityProvider:
+            def authorize_access_token(self):
+                return {"userinfo": {"sub": "shared-subject"}}
+
+            def userinfo(self, token):
+                return {"sub": "shared-subject", "email": "linked@example.com", "email_verified": True}
+
+        new_browser = server.app.test_client()
+        with new_browser.session_transaction() as state:
+            state["return_to"] = "/my-gifs"
+        with patch.object(server, "OIDC_READY", True), patch.object(server, "OIDC_ISSUER", "https://auth.frank.dev/api/auth"), patch.object(server.oauth, "frank", IdentityProvider(), create=True):
+            result = new_browser.get("/api/auth/oidc/callback")
+        self.assertEqual(result.status_code, 302)
+        self.assertEqual(result.location, "/my-gifs")
+        self.assertEqual(new_browser.get("/api/session").json["user"]["id"], existing["id"])
+        self.assertEqual(new_browser.get("/api/gifs").json["gifs"][0]["id"], gif_id)
 
 
 if __name__ == "__main__":

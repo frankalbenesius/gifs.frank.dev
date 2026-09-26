@@ -13,7 +13,7 @@ import { clearPending, readPending, writePending } from "./pending";
 
 interface AppState {
   user: User | null;
-  emailConfigured: boolean;
+  signInConfigured: boolean;
   pending: Blob | null;
   pendingWarning: string;
   setUser: (user: User | null) => void;
@@ -26,7 +26,7 @@ const Context = createContext<AppState | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [emailConfigured, setEmailConfigured] = useState(false);
+  const [signInConfigured, setSignInConfigured] = useState(false);
   const [pending, setPending] = useState<Blob | null>(null);
   const [pendingWarning, setPendingWarning] = useState("");
   const [ready, setReady] = useState(false);
@@ -34,7 +34,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const reloadSession = useCallback(async () => {
     const session = await loadSession();
     setUser(session.user);
-    setEmailConfigured(session.emailConfigured);
+    setSignInConfigured(session.signInConfigured);
   }, []);
 
   useEffect(() => {
@@ -43,7 +43,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       .then(([session, recording]) => {
         if (!active) return;
         setUser(session.user);
-        setEmailConfigured(session.emailConfigured);
+        setSignInConfigured(session.signInConfigured);
         setPending(recording);
       })
       .catch(() => {
@@ -83,7 +83,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const state = useMemo(
     () => ({
       user,
-      emailConfigured,
+      signInConfigured,
       pending,
       pendingWarning,
       setUser,
@@ -93,7 +93,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }),
     [
       user,
-      emailConfigured,
+      signInConfigured,
       pending,
       pendingWarning,
       savePending,

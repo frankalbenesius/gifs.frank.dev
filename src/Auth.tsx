@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { FormEvent } from "react";
 import { Button, Input, Label, TextField } from "react-aria-components";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -11,71 +11,9 @@ function destination(value: string | null): string {
 }
 
 export function SignIn() {
-  const { user, emailConfigured, pending, setUser, reloadSession } = useApp();
+  const { signInConfigured, pending } = useApp();
   const [params] = useSearchParams();
-  const navigate = useNavigate();
   const next = destination(params.get("next"));
-  const [email, setEmail] = useState(user?.email || "");
-  const [code, setCode] = useState("");
-  const [step, setStep] = useState<"email" | "code">("email");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    const refresh = () => {
-      void reloadSession().catch(() => {
-        // Keep the current state if a background refresh fails.
-      });
-    };
-    refresh();
-    window.addEventListener("focus", refresh);
-    return () => window.removeEventListener("focus", refresh);
-  }, [reloadSession]);
-
-  async function send(event?: FormEvent) {
-    event?.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      await api("/api/auth/request-code", jsonRequest("POST", { email }));
-      setStep("code");
-    } catch (failure) {
-      setError(
-        failure instanceof Error ? failure.message : "Could not send a code.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function verify(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      const result = await api<{ user: User }>(
-        "/api/auth/verify",
-        jsonRequest("POST", { email, code }),
-      );
-      setUser(result.user);
-      navigate(
-        result.user.displayName
-          ? next
-          : `/display-name?next=${encodeURIComponent(next)}`,
-        {
-          replace: true,
-        },
-      );
-    } catch (failure) {
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "Could not verify that code.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <main className="page narrow-page">
@@ -91,86 +29,19 @@ export function SignIn() {
             : "Sign in"}
       </h1>
       <p className="intro">A code by email. No password to remember.</p>
-      {step === "email" ? (
-        <form className="stack" onSubmit={(event) => void send(event)}>
-          <TextField
-            type="email"
-            value={email}
-            onChange={setEmail}
-            isRequired
-            autoComplete="email"
-          >
-            <Label>Email address</Label>
-            <Input placeholder="you@example.com" />
-          </TextField>
-          <Button
-            className="button primary"
-            type="submit"
-            isDisabled={busy || !emailConfigured}
-          >
-            {busy ? "Sending…" : "Send code"}
-          </Button>
-          {!emailConfigured && (
-            <p className="notice warning" role="status">
-              Email sign-in is waiting for a mail relay. Recording and
-              downloading still work.
-            </p>
-          )}
-          <p className="subtle">
-            If this email is new, we’ll make a private account for it.
-          </p>
-        </form>
-      ) : (
-        <form className="stack" onSubmit={(event) => void verify(event)}>
-          <p>
-            Code sent to <strong>{email}</strong>.
-          </p>
-          <TextField
-            value={code}
-            onChange={(value) => setCode(value.replace(/\D/g, "").slice(0, 6))}
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            isRequired
-          >
-            <Label>Six-digit code</Label>
-            <Input placeholder="000000" maxLength={6} />
-          </TextField>
-          <Button
-            className="button primary"
-            type="submit"
-            isDisabled={busy || code.length !== 6}
-          >
-            {busy ? "Checking…" : "Continue"}
-          </Button>
-          <div className="split-links">
-            <Button
-              className="text-button"
-              onPress={() => void send()}
-              isDisabled={busy}
-            >
-              Resend code
-            </Button>
-            <Button
-              className="text-button"
-              onPress={() => {
-                setStep("email");
-                setCode("");
-                setError("");
-              }}
-            >
-              Change email
-            </Button>
-          </div>
-        </form>
-      )}
+      {signInConfigured && <a className="button primary" href={`/api/auth/login?next=${encodeURIComponent(next)}`}>
+        Continue with email
+      </a>}
+      {!signInConfigured && <p className="notice warning" role="status">Sign-in is being set up.</p>}
+      <p className="subtle">If this email is new, we’ll make a private account for it.</p>
       {pending && (
         <p className="notice">
           Your GIF stays in this browser until you save it.
         </p>
       )}
-      {error && (
+      {params.get("error") && (
         <p className="notice error" role="alert">
-          {error}
+          Sign-in could not be completed. Please try again.
         </p>
       )}
     </main>

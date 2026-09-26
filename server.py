@@ -19,8 +19,10 @@ import uuid
 from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
+from urllib.parse import quote
 
-from flask import Flask, g, jsonify, make_response, request, send_file, send_from_directory
+from flask import Flask, g, jsonify, make_response, redirect, request, send_file, send_from_directory, session, url_for
+from authlib.integrations.flask_client import OAuth
 from PIL import Image, UnidentifiedImageError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -33,6 +35,10 @@ DIST_DIR = ROOT / "dist"
 APP_ENV = os.environ.get("APP_ENV", "development")
 MAIL_MODE = os.environ.get("MAIL_MODE", "smtp")
 SECRET = os.environ.get("APP_SECRET", "")
+OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "").rstrip("/")
+OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "")
+OIDC_CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "")
+OIDC_READY = bool(OIDC_ISSUER and OIDC_CLIENT_ID and OIDC_CLIENT_SECRET)
 MAX_GIF_BYTES = 8 * 1024 * 1024
 SESSION_SECONDS = 30 * 24 * 60 * 60
 INVITE_SECONDS = 30 * 24 * 60 * 60
@@ -45,8 +51,23 @@ if not SECRET:
     SECRET = secrets.token_urlsafe(32)
 
 app = Flask(__name__, static_folder=None)
+app.secret_key = SECRET
+app.config.update(
+    SESSION_COOKIE_SECURE=APP_ENV == "production",
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_HTTPONLY=True,
+)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.config["MAX_CONTENT_LENGTH"] = MAX_GIF_BYTES + 4096
+oauth = OAuth(app)
+if OIDC_READY:
+    oauth.register(
+        name="frank",
+        client_id=OIDC_CLIENT_ID,
+        client_secret=OIDC_CLIENT_SECRET,
+        server_metadata_url=f"{OIDC_ISSUER}/.well-known/openid-configuration",
+        client_kwargs={"scope": "openid email", "code_challenge_method": "S256"},
+    )
 
 
 def now() -> int:
@@ -241,12 +262,82 @@ def session_info():
             else None
         ),
         csrf=csrf,
-        emailConfigured=email_configured(),
+        signInConfigured=OIDC_READY,
     )
+
+
+def safe_destination(value: str | None) -> str:
+    return value if value and value.startswith("/") and not value.startswith(("//", "/\\")) else "/my-gifs"
+
+
+@app.get("/api/auth/login")
+def oidc_login():
+    if not OIDC_READY:
+        return error("Sign-in is not configured yet.", 503)
+    session["return_to"] = safe_destination(request.args.get("next"))
+    return oauth.frank.authorize_redirect(url_for("oidc_callback", _external=True))
+
+
+@app.get("/api/auth/oidc/callback")
+def oidc_callback():
+    if not OIDC_READY:
+        return error("Sign-in is not configured yet.", 503)
+    try:
+        token = oauth.frank.authorize_access_token()
+        claims = token.get("userinfo") or {}
+        identity = oauth.frank.userinfo(token=token)
+        if identity.get("sub") != claims.get("sub"):
+            return redirect("/signin?error=identity")
+    except Exception:
+        app.logger.exception("Shared sign-in failed")
+        return redirect("/signin?error=auth")
+    subject = identity.get("sub")
+    email = normalize_email(identity.get("email"))
+    if not subject or not email or identity.get("email_verified") is not True:
+        return redirect("/signin?error=identity")
+    db = get_db()
+    with db:
+        user = db.execute(
+            "SELECT * FROM users WHERE identity_issuer = ? AND identity_subject = ?",
+            (OIDC_ISSUER, subject),
+        ).fetchone()
+        if user is None:
+            # A verified email proves control of an existing GIF account.
+            user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+            if user and user["identity_subject"] is not None:
+                return redirect("/signin?error=account")
+            if user:
+                db.execute(
+                    "UPDATE users SET identity_issuer = ?, identity_subject = ? WHERE id = ?",
+                    (OIDC_ISSUER, subject, user["id"]),
+                )
+            else:
+                user_id = new_id()
+                db.execute(
+                    "INSERT INTO users(id, email, display_name, created_at, identity_issuer, identity_subject) "
+                    "VALUES (?, ?, NULL, ?, ?, ?)",
+                    (user_id, email, now(), OIDC_ISSUER, subject),
+                )
+                user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        elif user["email"] != email:
+            db.execute("UPDATE users SET email = ? WHERE id = ?", (email, user["id"]))
+        session_token = secrets.token_urlsafe(32)
+        db.execute(
+            "INSERT INTO sessions(token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+            (hashlib.sha256(session_token.encode()).hexdigest(), user["id"], now() + SESSION_SECONDS),
+        )
+    destination = session.pop("return_to", "/my-gifs")
+    if not user["display_name"]:
+        destination = f"/display-name?next={quote(destination, safe='')}"
+    response = redirect(destination)
+    response.set_cookie("gif_session", session_token, httponly=True, max_age=SESSION_SECONDS, **cookie_options())
+    return response
 
 
 @app.post("/api/auth/request-code")
 def request_code():
+    if OIDC_READY:
+        return error("Use shared sign-in.", 410)
     body = json_body()
     email = normalize_email(body.get("email"))
     if not email:
@@ -287,6 +378,8 @@ def request_code():
 
 @app.post("/api/auth/verify")
 def verify_code():
+    if OIDC_READY:
+        return error("Use shared sign-in.", 410)
     body = json_body()
     email = normalize_email(body.get("email"))
     code = str(body.get("code", ""))

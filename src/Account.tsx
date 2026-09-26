@@ -48,7 +48,7 @@ export function Account() {
   async function deleteAccount() {
     if (
       !window.confirm(
-        "Delete your account and all GIFs you own? People may still have copies they downloaded.",
+        "Delete your GIF account and all GIFs you own? Your frank.dev sign-in stays. People may still have copies they downloaded.",
       )
     )
       return;
@@ -97,14 +97,14 @@ export function Account() {
       </section>
       <section className="form-section">
         <Button className="button secondary" onPress={() => void signOut()}>
-          Sign out
+          Sign out of gif urself
         </Button>
       </section>
       <section className="form-section danger-zone">
         <h2>Delete account</h2>
         <p className="subtle">
           This deletes your GIFs from every group. If you are a group's only
-          manager, promote someone or end the group first.
+          manager, promote someone or end the group first. Your frank.dev sign-in remains for other apps.
         </p>
         <Button
           className="text-button danger"

@@ -17,36 +17,18 @@ async function signIn(
   email: string,
   next: string,
 ) {
-  await page.goto(`/signin?next=${encodeURIComponent(next)}`);
-  await page.getByLabel("Email address").fill(email);
-  await page.getByRole("button", { name: "Send code" }).click();
-  await expect(page.getByLabel("Six-digit code")).toBeVisible();
-  await page.getByLabel("Six-digit code").fill(latestCode(email));
-  await page.getByRole("button", { name: "Continue" }).click();
+  const session = await page.request.get("/api/session");
+  const { csrf } = await session.json();
+  const headers = { "X-CSRF-Token": csrf };
+  expect((await page.request.post("/api/auth/request-code", { data: { email }, headers })).ok()).toBeTruthy();
+  expect((await page.request.post("/api/auth/verify", {
+    data: { email, code: latestCode(email) }, headers,
+  })).ok()).toBeTruthy();
+  await page.goto(`/display-name?next=${encodeURIComponent(next)}`);
   await expect(page.getByLabel("Display name")).toBeVisible();
   await page.getByLabel("Display name").fill(email.split("@")[0]);
   await page.getByRole("button", { name: "Continue" }).click();
 }
-
-test("sign-in tab picks up mail service becoming available", async ({
-  page,
-}) => {
-  let emailConfigured = false;
-  await page.route("**/api/session", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ user: null, csrf: "test", emailConfigured }),
-    }),
-  );
-  await page.goto("/signin");
-  const sendCode = page.getByRole("button", { name: "Send code" });
-  await expect(sendCode).toBeDisabled();
-  emailConfigured = true;
-  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await expect(sendCode).toBeEnabled();
-  await expect(page.getByText("Email sign-in is waiting")).toHaveCount(0);
-});
 
 test("record, save, share, join, and revoke access", async ({
   browser,
@@ -67,13 +49,7 @@ test("record, save, share, join, and revoke access", async ({
   await page.getByRole("button", { name: "Save GIF" }).click();
   await expect(page).toHaveURL(/\/signin\?/);
   const owner = `owner-${Date.now()}@example.com`;
-  await page.getByLabel("Email address").fill(owner);
-  await page.getByRole("button", { name: "Send code" }).click();
-  await expect(page.getByLabel("Six-digit code")).toBeVisible();
-  await page.getByLabel("Six-digit code").fill(latestCode(owner));
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByLabel("Display name").fill("Owner");
-  await page.getByRole("button", { name: "Continue" }).click();
+  await signIn(page, owner, "/save");
   await expect(page.getByRole("heading", { name: "Save GIF" })).toBeVisible();
   await page.getByRole("button", { name: "anger" }).click();
   await page.getByRole("button", { name: "Save privately" }).click();
