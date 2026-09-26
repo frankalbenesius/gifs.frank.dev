@@ -52,7 +52,7 @@ jobs:
           mkdir -p ~/.ssh
           install -m 600 /dev/null ~/.ssh/deploy_key
           printf '%s\n' "${{ secrets.HOMELAB_DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
-          printf '%s\n' "${{ secrets.HOMELAB_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.HOMELAB_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
       - name: Sync application
         env:
           HOMELAB_HOST: 5.78.105.29
