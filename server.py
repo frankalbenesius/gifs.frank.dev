@@ -11,6 +11,7 @@ import re
 import secrets
 import shutil
 import smtplib
+import ssl
 import sqlite3
 import sys
 import time
@@ -183,6 +184,15 @@ def ip_hash() -> str:
     return hmac.new(SECRET.encode(), address.encode(), hashlib.sha256).hexdigest()
 
 
+def email_configured() -> bool:
+    if MAIL_MODE == "file" and APP_ENV != "production":
+        return True
+    return all(
+        os.environ.get(key)
+        for key in ("SMTP_HOST", "SMTP_FROM", "SMTP_USER", "SMTP_PASSWORD")
+    )
+
+
 def send_code(email: str, code: str) -> None:
     if MAIL_MODE == "file" and APP_ENV != "production":
         outbox = Path(os.environ.get("MAIL_OUTBOX", DATA_DIR / "mail-outbox.jsonl"))
@@ -192,7 +202,7 @@ def send_code(email: str, code: str) -> None:
         return
     host = os.environ.get("SMTP_HOST", "")
     sender = os.environ.get("SMTP_FROM", "")
-    if not host or not sender:
+    if not email_configured():
         raise RuntimeError("Email delivery is not configured")
     message = EmailMessage()
     message["From"] = sender
@@ -201,11 +211,10 @@ def send_code(email: str, code: str) -> None:
     message.set_content(f"Your sign-in code is {code}. It expires in 10 minutes.\n")
     port = int(os.environ.get("SMTP_PORT", "587"))
     with smtplib.SMTP(host, port, timeout=12) as smtp:
-        smtp.starttls()
+        smtp.starttls(context=ssl.create_default_context())
         username = os.environ.get("SMTP_USER", "")
         password = os.environ.get("SMTP_PASSWORD", "")
-        if username and password:
-            smtp.login(username, password)
+        smtp.login(username, password)
         smtp.send_message(message)
 
 
@@ -232,8 +241,7 @@ def session_info():
             else None
         ),
         csrf=csrf,
-        emailConfigured=MAIL_MODE == "file" and APP_ENV != "production"
-        or bool(os.environ.get("SMTP_HOST") and os.environ.get("SMTP_FROM")),
+        emailConfigured=email_configured(),
     )
 
 
@@ -243,7 +251,7 @@ def request_code():
     email = normalize_email(body.get("email"))
     if not email:
         return error("Enter a valid email address.")
-    if MAIL_MODE != "file" and not (os.environ.get("SMTP_HOST") and os.environ.get("SMTP_FROM")):
+    if not email_configured():
         return error("Email sign-in is not configured yet.", 503)
     db = get_db()
     moment = now()
