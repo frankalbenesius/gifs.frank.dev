@@ -1,0 +1,72 @@
+name: Test and deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gifs-production
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: npm ci
+      - run: npm run build
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests
+      - run: npx playwright install --with-deps chromium
+      - name: Browser flow
+        run: |
+          MAIL_MODE=file python server.py serve > /tmp/gifs-api.log 2>&1 &
+          npm run dev -- --host 127.0.0.1 > /tmp/gifs-vite.log 2>&1 &
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8000/api/health >/dev/null && curl -fsS http://127.0.0.1:5173/ >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8000/api/health >/dev/null
+          curl -fsS http://127.0.0.1:5173/ >/dev/null
+          npm run test:e2e
+      - run: cp .env.example .env && docker compose -f compose.yaml -f compose.homelab.yaml config --quiet
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          install -m 600 /dev/null ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.HOMELAB_DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.HOMELAB_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+      - name: Sync application
+        env:
+          HOMELAB_HOST: 5.78.105.29
+        run: |
+          ssh -i ~/.ssh/deploy_key root@"$HOMELAB_HOST" "mkdir -p /opt/homelab/apps/gifs"
+          rsync -az --delete \
+            --exclude .env --exclude .git/ --exclude data/ --exclude node_modules/ \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./ root@"$HOMELAB_HOST":/opt/homelab/apps/gifs/
+      - name: Deploy and verify
+        env:
+          HOMELAB_HOST: 5.78.105.29
+        run: |
+          ssh -i ~/.ssh/deploy_key root@"$HOMELAB_HOST" \
+            "cd /opt/homelab/apps/gifs && docker compose -f compose.yaml -f compose.homelab.yaml up -d --build --remove-orphans --wait --wait-timeout 120"
+          ssh -i ~/.ssh/deploy_key root@"$HOMELAB_HOST" \
+            "curl --fail --silent --show-error http://127.0.0.1:8788/api/health"

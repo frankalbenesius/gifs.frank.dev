@@ -1,0 +1,7 @@
+services:
+  gifs:
+    networks:
+      - web
+networks:
+  web:
+    external: true

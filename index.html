@@ -3,34 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Record a three-second GIF with your webcam." />
+    <meta name="theme-color" content="#f6f5f1" />
+    <meta name="description" content="Make a reaction GIF and share it with your people." />
     <title>gif urself</title>
-    <link rel="stylesheet" href="/style.css" />
     <script defer src="/lib/LZWEncoder.js"></script>
     <script defer src="/lib/NeuQuant.js"></script>
     <script defer src="/lib/GIFEncoder.js"></script>
-    <script defer src="/app.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
   </head>
   <body>
-    <main>
-      <h1>gif urself</h1>
-
-      <div class="frame" id="frame">
-        <video id="camera" width="400" height="300" autoplay muted playsinline></video>
-        <img id="result" width="400" height="300" alt="Your recorded GIF" hidden />
-        <div class="overlay" id="overlay" hidden aria-hidden="true"></div>
-      </div>
-
-      <div class="actions">
-        <button id="record" disabled>
-          <span class="button-progress" id="progress-fill" aria-hidden="true"></span>
-          <span class="button-label" id="record-label">starting camera…</span>
-        </button>
-        <a id="download" hidden>download gif</a>
-      </div>
-      <div id="progress" class="sr-only" role="progressbar" aria-label="Recording progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden></div>
-      <p id="status" class="sr-only" role="status" aria-live="polite"></p>
-      <canvas id="capture" width="400" height="300" hidden></canvas>
-    </main>
+    <div id="root"></div>
   </body>
 </html>
