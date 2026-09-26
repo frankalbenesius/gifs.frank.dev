@@ -1,8 +1,9 @@
 interface GifEncoder {
   setRepeat(count: number): void;
+  setSize(width: number, height: number): void;
   start(): void;
   setDelay(milliseconds: number): void;
-  addFrame(context: CanvasRenderingContext2D): void;
+  addFrame(pixels: Uint8ClampedArray, isImageData: true): boolean;
   finish(): void;
   stream(): { getData(): string };
 }
@@ -10,21 +11,20 @@ interface GifEncoder {
 declare const GIFEncoder: new () => GifEncoder;
 
 export const DURATION_MS = 3000;
-export const FRAME_COUNT = 45;
+export const FRAME_COUNT = 72;
 
-export function createEncoder(): GifEncoder {
+export function createEncoder(width: number, height: number): GifEncoder {
   const encoder = new GIFEncoder();
   encoder.setRepeat(0);
   encoder.start();
+  encoder.setSize(width, height);
   return encoder;
 }
 
-export function addFrame(
-  encoder: GifEncoder,
+export function captureFrame(
   context: CanvasRenderingContext2D,
   video: HTMLVideoElement,
-  index: number,
-): void {
+): Uint8ClampedArray {
   const sourceRatio = video.videoWidth / video.videoHeight;
   const targetRatio = context.canvas.width / context.canvas.height;
   let sx = 0;
@@ -49,10 +49,19 @@ export function addFrame(
     context.canvas.width,
     context.canvas.height,
   );
+  return context.getImageData(0, 0, context.canvas.width, context.canvas.height)
+    .data;
+}
+
+export function addFrame(
+  encoder: GifEncoder,
+  pixels: Uint8ClampedArray,
+  index: number,
+): void {
   const next = Math.round(((index + 1) * DURATION_MS) / FRAME_COUNT / 10);
   const current = Math.round((index * DURATION_MS) / FRAME_COUNT / 10);
   encoder.setDelay((next - current) * 10);
-  encoder.addFrame(context);
+  if (!encoder.addFrame(pixels, true)) throw new Error("GIF encoding failed");
 }
 
 export function finishEncoder(encoder: GifEncoder): Blob {

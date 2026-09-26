@@ -4,6 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useApp } from "./AppContext";
 import {
   addFrame,
+  captureFrame,
   createEncoder,
   DURATION_MS,
   finishEncoder,
@@ -116,40 +117,51 @@ export function Recorder() {
     }
     setPhase("recording");
     setProgress(0);
-    try {
-      const encoder = createEncoder();
-      let frame = 0;
-      const capture = () => {
-        if (!active.current) return;
-        addFrame(encoder, context, video, frame);
-        frame += 1;
-        setProgress(frame / FRAME_COUNT);
-        if (frame >= FRAME_COUNT) {
+    const frames: Uint8ClampedArray[] = [];
+    const encode = async () => {
+      try {
+        const encoder = createEncoder(
+          context.canvas.width,
+          context.canvas.height,
+        );
+        for (let index = 0; index < frames.length; index += 1) {
+          if (!active.current) return;
+          addFrame(encoder, frames[index], index);
+          if ((index + 1) % 4 === 0) {
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+          }
+        }
+        const blob = finishEncoder(encoder);
+        if (active.current) void savePending(blob);
+      } catch {
+        if (active.current) {
+          setPhase("ready");
+          setMessage("Could not make this GIF. Try recording again.");
+        }
+      }
+    };
+    const capture = () => {
+      if (!active.current) return;
+      try {
+        frames.push(captureFrame(context, video));
+        setProgress(frames.length / FRAME_COUNT);
+        if (frames.length >= FRAME_COUNT) {
           window.clearInterval(recordingTimer);
           setPhase("encoding");
-          window.setTimeout(() => {
-            try {
-              const blob = finishEncoder(encoder);
-              if (active.current) void savePending(blob);
-            } catch {
-              if (active.current) {
-                setPhase("ready");
-                setMessage("Could not make this GIF. Try recording again.");
-              }
-            }
-          }, 0);
+          window.setTimeout(() => void encode(), 0);
         }
-      };
-      capture();
-      const recordingTimer = window.setInterval(
-        capture,
-        DURATION_MS / FRAME_COUNT,
-      );
-      timers.current.push(recordingTimer);
-    } catch {
-      setPhase("error");
-      setMessage("Could not start the GIF encoder. Reload and try again.");
-    }
+      } catch {
+        window.clearInterval(recordingTimer);
+        setPhase("ready");
+        setMessage("The camera was interrupted. Try again.");
+      }
+    };
+    const recordingTimer = window.setInterval(
+      capture,
+      DURATION_MS / FRAME_COUNT,
+    );
+    timers.current.push(recordingTimer);
+    capture();
   }
 
   async function startOver() {
