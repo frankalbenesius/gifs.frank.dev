@@ -28,6 +28,26 @@ async function signIn(
   await page.getByRole("button", { name: "Continue" }).click();
 }
 
+test("sign-in tab picks up mail service becoming available", async ({
+  page,
+}) => {
+  let emailConfigured = false;
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ user: null, csrf: "test", emailConfigured }),
+    }),
+  );
+  await page.goto("/signin");
+  const sendCode = page.getByRole("button", { name: "Send code" });
+  await expect(sendCode).toBeDisabled();
+  emailConfigured = true;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(sendCode).toBeEnabled();
+  await expect(page.getByText("Email sign-in is waiting")).toHaveCount(0);
+});
+
 test("record, save, share, join, and revoke access", async ({
   browser,
   page,

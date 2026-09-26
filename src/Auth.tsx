@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { Button, Input, Label, TextField } from "react-aria-components";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -11,7 +11,7 @@ function destination(value: string | null): string {
 }
 
 export function SignIn() {
-  const { user, emailConfigured, pending, setUser } = useApp();
+  const { user, emailConfigured, pending, setUser, reloadSession } = useApp();
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const next = destination(params.get("next"));
@@ -20,6 +20,17 @@ export function SignIn() {
   const [step, setStep] = useState<"email" | "code">("email");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    const refresh = () => {
+      void reloadSession().catch(() => {
+        // Keep the current state if a background refresh fails.
+      });
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [reloadSession]);
 
   async function send(event?: FormEvent) {
     event?.preventDefault();
