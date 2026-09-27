@@ -23,6 +23,8 @@ The local callback returns to Vite at `http://127.0.0.1:5173` so a recording hel
 
 `compose.yaml` builds the client and API into one image. SQLite and GIF files live in the `gifs-data` Docker volume at `/data`; the web server never serves this directory directly. Caddy routes `gifs.frank.dev` to the `gifs:8000` service on the external `web` network. `/api/health` checks database access. The app migrates the database before starting Gunicorn; later numbered migrations create a SQLite backup in `/data/backups` first. Back up the whole `gifs-data` volume, including SQLite and media files, before major changes.
 
+- [ ] Work out automated off-host backups for `gifs-data` (SQLite and GIF media) and the production `.env`, including retention, monitoring, and a documented restore test. Migration-time SQLite backups alone do not cover media or host loss.
+
 Create `/opt/homelab/apps/gifs/.env` with `APP_ENV=production`, a random `APP_SECRET` of at least 32 characters, `OIDC_ISSUER=https://auth.frank.dev/api/auth`, and the GIF app's OIDC client ID and secret. Set mode 600. The verified email from Better Auth links to an existing GIF account without changing its saved GIFs or local user ID. Anonymous recording and downloading remain available. The deployment workflow syncs source, preserves `.env` and the Docker volume, builds, migrates, starts, and verifies health after tests pass. Caddy is maintained in the separate homelab repo.
 
 Older databases may contain group and sharing rows. They remain stored for now, but group endpoints are gone and GIFs are accessible only to their owners. No migration deletes existing data.
