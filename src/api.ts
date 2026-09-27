@@ -1,39 +1,14 @@
 export interface User {
   id: string;
   email: string;
-  displayName: string | null;
 }
 
 export interface Gif {
   id: string;
-  ownerId: string;
-  ownerName: string;
-  owned: boolean;
-  tags: string[];
-  groupIds: string[];
   createdAt: number;
   sizeBytes: number;
   fileUrl: string;
   posterUrl: string;
-}
-
-export interface Group {
-  id: string;
-  name: string;
-  role: "member" | "manager";
-  memberCount: number;
-}
-
-export interface Member {
-  id: string;
-  displayName: string;
-  email?: string;
-  role: "member" | "manager";
-}
-
-export interface Invite {
-  token: string;
-  expiresAt: number;
 }
 
 let csrfToken = "";

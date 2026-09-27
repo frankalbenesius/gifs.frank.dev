@@ -9,7 +9,6 @@ import json
 import os
 import re
 import secrets
-import shutil
 import smtplib
 import ssl
 import sqlite3
@@ -19,7 +18,6 @@ import uuid
 from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
-from urllib.parse import quote
 
 from flask import Flask, g, jsonify, make_response, redirect, request, send_file, send_from_directory, session, url_for
 from authlib.integrations.flask_client import OAuth
@@ -33,6 +31,9 @@ MEDIA_DIR = DATA_DIR / "media"
 BACKUP_DIR = DATA_DIR / "backups"
 DIST_DIR = ROOT / "dist"
 APP_ENV = os.environ.get("APP_ENV", "development")
+FRONTEND_ORIGIN = os.environ.get(
+    "FRONTEND_ORIGIN", "http://127.0.0.1:5173" if APP_ENV != "production" else ""
+).rstrip("/")
 MAIL_MODE = os.environ.get("MAIL_MODE", "smtp")
 SECRET = os.environ.get("APP_SECRET", "")
 OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "").rstrip("/")
@@ -41,7 +42,6 @@ OIDC_CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "")
 OIDC_READY = bool(OIDC_ISSUER and OIDC_CLIENT_ID and OIDC_CLIENT_SECRET)
 MAX_GIF_BYTES = 8 * 1024 * 1024
 SESSION_SECONDS = 30 * 24 * 60 * 60
-INVITE_SECONDS = 30 * 24 * 60 * 60
 CODE_SECONDS = 10 * 60
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -257,7 +257,7 @@ def session_info():
         g.new_csrf = csrf
     return jsonify(
         user=(
-            {"id": user["id"], "email": user["email"], "displayName": user["display_name"]}
+            {"id": user["id"], "email": user["email"]}
             if user
             else None
         ),
@@ -267,7 +267,11 @@ def session_info():
 
 
 def safe_destination(value: str | None) -> str:
-    return value if value and value.startswith("/") and not value.startswith(("//", "/\\")) else "/my-gifs"
+    return value if value and value.startswith("/") and not value.startswith(("//", "/\\")) else "/gifs"
+
+
+def client_destination(path: str) -> str:
+    return f"{FRONTEND_ORIGIN}{path}" if FRONTEND_ORIGIN else path
 
 
 @app.get("/api/auth/login")
@@ -287,14 +291,14 @@ def oidc_callback():
         claims = token.get("userinfo") or {}
         identity = oauth.frank.userinfo(token=token)
         if identity.get("sub") != claims.get("sub"):
-            return redirect("/signin?error=identity")
+            return redirect(client_destination("/signin?error=identity"))
     except Exception:
         app.logger.exception("Shared sign-in failed")
-        return redirect("/signin?error=auth")
+        return redirect(client_destination("/signin?error=auth"))
     subject = identity.get("sub")
     email = normalize_email(identity.get("email"))
     if not subject or not email or identity.get("email_verified") is not True:
-        return redirect("/signin?error=identity")
+        return redirect(client_destination("/signin?error=identity"))
     db = get_db()
     with db:
         user = db.execute(
@@ -305,7 +309,7 @@ def oidc_callback():
             # A verified email proves control of an existing GIF account.
             user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
             if user and user["identity_subject"] is not None:
-                return redirect("/signin?error=account")
+                return redirect(client_destination("/signin?error=account"))
             if user:
                 db.execute(
                     "UPDATE users SET identity_issuer = ?, identity_subject = ? WHERE id = ?",
@@ -314,8 +318,8 @@ def oidc_callback():
             else:
                 user_id = new_id()
                 db.execute(
-                    "INSERT INTO users(id, email, display_name, created_at, identity_issuer, identity_subject) "
-                    "VALUES (?, ?, NULL, ?, ?, ?)",
+                    "INSERT INTO users(id, email, created_at, identity_issuer, identity_subject) "
+                    "VALUES (?, ?, ?, ?, ?)",
                     (user_id, email, now(), OIDC_ISSUER, subject),
                 )
                 user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
@@ -326,10 +330,8 @@ def oidc_callback():
             "INSERT INTO sessions(token_hash, user_id, expires_at) VALUES (?, ?, ?)",
             (hashlib.sha256(session_token.encode()).hexdigest(), user["id"], now() + SESSION_SECONDS),
         )
-    destination = session.pop("return_to", "/my-gifs")
-    if not user["display_name"]:
-        destination = f"/display-name?next={quote(destination, safe='')}"
-    response = redirect(destination)
+    destination = session.pop("return_to", "/gifs")
+    response = redirect(client_destination(destination))
     response.set_cookie("gif_session", session_token, httponly=True, max_age=SESSION_SECONDS, **cookie_options())
     return response
 
@@ -400,7 +402,7 @@ def verify_code():
         if not user:
             user_id = new_id()
             db.execute(
-                "INSERT INTO users(id, email, display_name, created_at) VALUES (?, ?, NULL, ?)",
+                "INSERT INTO users(id, email, created_at) VALUES (?, ?, ?)",
                 (user_id, email, now()),
             )
             user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
@@ -408,9 +410,7 @@ def verify_code():
             "INSERT INTO sessions(token_hash, user_id, expires_at) VALUES (?, ?, ?)",
             (hashlib.sha256(token.encode()).hexdigest(), user["id"], now() + SESSION_SECONDS),
         )
-    response = make_response(jsonify(user={
-        "id": user["id"], "email": user["email"], "displayName": user["display_name"]
-    }))
+    response = make_response(jsonify(user={"id": user["id"], "email": user["email"]}))
     response.set_cookie(
         "gif_session", token, httponly=True, max_age=SESSION_SECONDS, **cookie_options()
     )
@@ -431,340 +431,16 @@ def signout(user):
     return response
 
 
-def group_row(user_id: str, group_id: str):
-    return get_db().execute(
-        "SELECT groups.*, memberships.role FROM groups "
-        "JOIN memberships ON memberships.group_id = groups.id "
-        "WHERE groups.id = ? AND memberships.user_id = ?",
-        (group_id, user_id),
-    ).fetchone()
-
-
-def group_payload(row) -> dict:
-    count = get_db().execute(
-        "SELECT COUNT(*) FROM memberships WHERE group_id = ?", (row["id"],)
-    ).fetchone()[0]
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "role": row["role"],
-        "memberCount": count,
-    }
-
-
-@app.get("/api/groups")
-@login_required
-def list_groups(user):
-    rows = get_db().execute(
-        "SELECT groups.*, memberships.role FROM groups "
-        "JOIN memberships ON memberships.group_id = groups.id "
-        "WHERE memberships.user_id = ? ORDER BY groups.created_at DESC",
-        (user["id"],),
-    ).fetchall()
-    return jsonify(groups=[group_payload(row) for row in rows])
-
-
-@app.post("/api/groups")
-@login_required
-def create_group(user):
-    name = str(json_body().get("name", "")).strip()
-    if not 1 <= len(name) <= 60:
-        return error("Group name must be 1–60 characters.")
-    group_id = new_id()
-    db = get_db()
-    with db:
-        db.execute(
-            "INSERT INTO groups(id, name, created_at) VALUES (?, ?, ?)",
-            (group_id, name, now()),
-        )
-        db.execute(
-            "INSERT INTO memberships(group_id, user_id, role, joined_at) "
-            "VALUES (?, ?, 'manager', ?)",
-            (group_id, user["id"], now()),
-        )
-        reset_invite(db, group_id)
-    return jsonify(group=group_payload(group_row(user["id"], group_id))), 201
-
-
-@app.get("/api/groups/<group_id>")
-@login_required
-def get_group(user, group_id):
-    row = group_row(user["id"], group_id)
-    return jsonify(group=group_payload(row)) if row else error("Group unavailable.", 404)
-
-
-@app.get("/api/groups/<group_id>/members")
-@login_required
-def group_members(user, group_id):
-    group = group_row(user["id"], group_id)
-    if not group:
-        return error("Group unavailable.", 404)
-    rows = get_db().execute(
-        "SELECT users.id, users.display_name, users.email, memberships.role "
-        "FROM memberships JOIN users ON users.id = memberships.user_id "
-        "WHERE memberships.group_id = ? ORDER BY memberships.joined_at",
-        (group_id,),
-    ).fetchall()
-    return jsonify(members=[
-        {
-            "id": row["id"],
-            "displayName": row["display_name"] or "Unnamed member",
-            "role": row["role"],
-            **({"email": row["email"]} if group["role"] == "manager" else {}),
-        }
-        for row in rows
-    ])
-
-
-def manager_group(user_id: str, group_id: str):
-    group = group_row(user_id, group_id)
-    return group if group and group["role"] == "manager" else None
-
-
-def reset_invite(db: sqlite3.Connection, group_id: str) -> dict:
-    token = secrets.token_urlsafe(24)
-    expires_at = now() + INVITE_SECONDS
-    db.execute(
-        "INSERT INTO invites(group_id, token, expires_at) VALUES (?, ?, ?) "
-        "ON CONFLICT(group_id) DO UPDATE SET token=excluded.token, expires_at=excluded.expires_at",
-        (group_id, token, expires_at),
-    )
-    return {"token": token, "expiresAt": expires_at}
-
-
-@app.get("/api/groups/<group_id>/invite")
-@login_required
-def get_invite(user, group_id):
-    if not manager_group(user["id"], group_id):
-        return error("Only managers can invite.", 403)
-    db = get_db()
-    row = db.execute(
-        "SELECT token, expires_at FROM invites WHERE group_id = ?", (group_id,)
-    ).fetchone()
-    if not row or row["expires_at"] <= now():
-        return jsonify(invite=None)
-    return jsonify(invite={"token": row["token"], "expiresAt": row["expires_at"]})
-
-
-@app.post("/api/groups/<group_id>/invite/reset")
-@login_required
-def renew_invite(user, group_id):
-    if not manager_group(user["id"], group_id):
-        return error("Only managers can reset invitations.", 403)
-    db = get_db()
-    with db:
-        invite = reset_invite(db, group_id)
-    return jsonify(invite=invite)
-
-
-@app.get("/api/invites/<token>")
-def inspect_invite(token):
-    row = get_db().execute(
-        "SELECT groups.id, groups.name, invites.expires_at FROM invites "
-        "JOIN groups ON groups.id = invites.group_id "
-        "WHERE invites.token = ? AND invites.expires_at > ?",
-        (token, now()),
-    ).fetchone()
-    if not row:
-        return error("This invite link has expired or been reset.", 404)
-    user = current_user()
-    already_member = bool(user and group_row(user["id"], row["id"]))
-    return jsonify(group={"id": row["id"], "name": row["name"]}, alreadyMember=already_member)
-
-
-@app.post("/api/invites/<token>/join")
-@login_required
-def join_group(user, token):
-    db = get_db()
-    row = db.execute(
-        "SELECT group_id FROM invites WHERE token = ? AND expires_at > ?",
-        (token, now()),
-    ).fetchone()
-    if not row:
-        return error("This invite link has expired or been reset.", 404)
-    group_id = row["group_id"]
-    with db:
-        db.execute(
-            "INSERT OR IGNORE INTO memberships(group_id, user_id, role, joined_at) "
-            "VALUES (?, ?, 'member', ?)",
-            (group_id, user["id"], now()),
-        )
-    return jsonify(group=group_payload(group_row(user["id"], group_id)))
-
-
-@app.patch("/api/groups/<group_id>/members/<member_id>")
-@login_required
-def change_member_role(user, group_id, member_id):
-    if not manager_group(user["id"], group_id):
-        return error("Only managers can change roles.", 403)
-    role = json_body().get("role")
-    if role not in ("member", "manager"):
-        return error("Choose member or manager.")
-    db = get_db()
-    member = db.execute(
-        "SELECT role FROM memberships WHERE group_id = ? AND user_id = ?",
-        (group_id, member_id),
-    ).fetchone()
-    if not member:
-        return error("Member unavailable.", 404)
-    if member["role"] == "manager" and role == "member":
-        count = db.execute(
-            "SELECT COUNT(*) FROM memberships WHERE group_id = ? AND role = 'manager'",
-            (group_id,),
-        ).fetchone()[0]
-        if count <= 1:
-            return error("Promote another manager first.", 409)
-    with db:
-        db.execute(
-            "UPDATE memberships SET role = ? WHERE group_id = ? AND user_id = ?",
-            (role, group_id, member_id),
-        )
-    return jsonify(role=role)
-
-
-@app.delete("/api/groups/<group_id>/members/<member_id>")
-@login_required
-def remove_member(user, group_id, member_id):
-    if not manager_group(user["id"], group_id):
-        return error("Only managers can remove members.", 403)
-    if member_id == user["id"]:
-        return error("Use Leave group for your own membership.")
-    db = get_db()
-    member = db.execute(
-        "SELECT role FROM memberships WHERE group_id = ? AND user_id = ?",
-        (group_id, member_id),
-    ).fetchone()
-    if not member:
-        return error("Member unavailable.", 404)
-    if member["role"] == "manager":
-        managers = db.execute(
-            "SELECT COUNT(*) FROM memberships WHERE group_id = ? AND role = 'manager'",
-            (group_id,),
-        ).fetchone()[0]
-        if managers <= 1:
-            return error("Promote another manager first.", 409)
-    with db:
-        db.execute(
-            "DELETE FROM gif_groups WHERE group_id = ? AND gif_id IN "
-            "(SELECT id FROM gifs WHERE owner_id = ?)",
-            (group_id, member_id),
-        )
-        db.execute(
-            "DELETE FROM memberships WHERE group_id = ? AND user_id = ?",
-            (group_id, member_id),
-        )
-        reset_invite(db, group_id)
-    return jsonify(removed=True)
-
-
-@app.post("/api/groups/<group_id>/leave")
-@login_required
-def leave_group(user, group_id):
-    group = group_row(user["id"], group_id)
-    if not group:
-        return error("Group unavailable.", 404)
-    db = get_db()
-    if group["role"] == "manager":
-        managers = db.execute(
-            "SELECT COUNT(*) FROM memberships WHERE group_id = ? AND role = 'manager'",
-            (group_id,),
-        ).fetchone()[0]
-        if managers <= 1:
-            return error("Promote another manager or end the group first.", 409)
-    with db:
-        db.execute(
-            "DELETE FROM gif_groups WHERE group_id = ? AND gif_id IN "
-            "(SELECT id FROM gifs WHERE owner_id = ?)",
-            (group_id, user["id"]),
-        )
-        db.execute(
-            "DELETE FROM memberships WHERE group_id = ? AND user_id = ?",
-            (group_id, user["id"]),
-        )
-    return jsonify(left=True)
-
-
-@app.delete("/api/groups/<group_id>")
-@login_required
-def end_group(user, group_id):
-    if not manager_group(user["id"], group_id):
-        return error("Only managers can end a group.", 403)
-    with get_db():
-        get_db().execute("DELETE FROM groups WHERE id = ?", (group_id,))
-    return jsonify(ended=True)
-
-
-def normalize_tags(raw: object) -> list[str] | None:
-    if not isinstance(raw, list) or len(raw) > 8:
-        return None
-    tags = []
-    for value in raw:
-        if not isinstance(value, str):
-            return None
-        tag = " ".join(value.strip().casefold().split())
-        if not tag or len(tag) > 32:
-            return None
-        if tag not in tags:
-            tags.append(tag)
-    return tags
-
-
-def normalize_group_ids(raw: object, user_id: str) -> list[str] | None:
-    if not isinstance(raw, list) or len(raw) > 50:
-        return None
-    group_ids = []
-    for value in raw:
-        if not isinstance(value, str) or not group_row(user_id, value):
-            return None
-        if value not in group_ids:
-            group_ids.append(value)
-    return group_ids
-
-
 def gif_access(user_id: str, gif_id: str):
     return get_db().execute(
-        "SELECT gifs.* FROM gifs WHERE gifs.id = ? AND (gifs.owner_id = ? OR EXISTS ("
-        "SELECT 1 FROM gif_groups JOIN memberships ON memberships.group_id = gif_groups.group_id "
-        "WHERE gif_groups.gif_id = gifs.id AND memberships.user_id = ?))",
-        (gif_id, user_id, user_id),
+        "SELECT * FROM gifs WHERE id = ? AND owner_id = ?",
+        (gif_id, user_id),
     ).fetchone()
 
 
-def gif_payload(row, viewer_id: str) -> dict:
-    db = get_db()
-    tags = [
-        item["tag"]
-        for item in db.execute(
-            "SELECT tag FROM gif_tags WHERE gif_id = ? ORDER BY tag", (row["id"],)
-        ).fetchall()
-    ]
-    if row["owner_id"] == viewer_id:
-        group_ids = [
-            item["group_id"]
-            for item in db.execute(
-                "SELECT group_id FROM gif_groups WHERE gif_id = ?", (row["id"],)
-            ).fetchall()
-        ]
-    else:
-        group_ids = [
-            item["group_id"]
-            for item in db.execute(
-                "SELECT gif_groups.group_id FROM gif_groups "
-                "JOIN memberships ON memberships.group_id = gif_groups.group_id "
-                "WHERE gif_groups.gif_id = ? AND memberships.user_id = ?",
-                (row["id"], viewer_id),
-            ).fetchall()
-        ]
-    owner = db.execute(
-        "SELECT display_name FROM users WHERE id = ?", (row["owner_id"],)
-    ).fetchone()
+def gif_payload(row) -> dict:
     return {
         "id": row["id"],
-        "ownerId": row["owner_id"],
-        "ownerName": owner["display_name"] or "Unnamed member",
-        "owned": row["owner_id"] == viewer_id,
-        "tags": tags,
-        "groupIds": group_ids,
         "createdAt": row["created_at"],
         "sizeBytes": row["size_bytes"],
         "fileUrl": f"/api/gifs/{row['id']}/file",
@@ -772,60 +448,25 @@ def gif_payload(row, viewer_id: str) -> dict:
     }
 
 
-def gif_list(user_id: str, owner_id: str | None = None, group_id: str | None = None):
-    db = get_db()
-    tag = request.args.get("tag", "").strip().casefold()
-    creator = request.args.get("creator", "").strip()
-    if owner_id:
-        sql = "SELECT DISTINCT gifs.* FROM gifs WHERE gifs.owner_id = ?"
-        params: list = [owner_id]
-    else:
-        sql = (
-            "SELECT DISTINCT gifs.* FROM gifs JOIN gif_groups ON gif_groups.gif_id = gifs.id "
-            "WHERE gif_groups.group_id = ?"
-        )
-        params = [group_id]
-    if tag:
-        sql += " AND EXISTS (SELECT 1 FROM gif_tags WHERE gif_tags.gif_id = gifs.id AND tag = ?)"
-        params.append(tag)
-    if creator and not owner_id:
-        sql += " AND gifs.owner_id = ?"
-        params.append(creator)
-    sql += " ORDER BY gifs.created_at DESC"
-    rows = db.execute(sql, params).fetchall()
-    return [gif_payload(row, user_id) for row in rows]
+def gif_list(user_id: str):
+    rows = get_db().execute(
+        "SELECT * FROM gifs WHERE owner_id = ? ORDER BY created_at DESC",
+        (user_id,),
+    ).fetchall()
+    return [gif_payload(row) for row in rows]
 
 
 @app.get("/api/gifs")
 @login_required
 def own_gifs(user):
-    return jsonify(gifs=gif_list(user["id"], owner_id=user["id"]))
-
-
-@app.get("/api/groups/<group_id>/gifs")
-@login_required
-def group_gifs(user, group_id):
-    if not group_row(user["id"], group_id):
-        return error("Group unavailable.", 404)
-    return jsonify(gifs=gif_list(user["id"], group_id=group_id))
-
-
-@app.get("/api/groups/<group_id>/random")
-@login_required
-def random_group_gif(user, group_id):
-    if not group_row(user["id"], group_id):
-        return error("Group unavailable.", 404)
-    gifs = gif_list(user["id"], group_id=group_id)
-    if not gifs:
-        return error("No GIFs match those filters.", 404)
-    return jsonify(gif=secrets.choice(gifs))
+    return jsonify(gifs=gif_list(user["id"]))
 
 
 @app.get("/api/gifs/<gif_id>")
 @login_required
 def get_gif(user, gif_id):
     row = gif_access(user["id"], gif_id)
-    return jsonify(gif=gif_payload(row, user["id"])) if row else error("GIF unavailable.", 404)
+    return jsonify(gif=gif_payload(row)) if row else error("GIF unavailable.", 404)
 
 
 def media_response(user, gif_id, extension: str, mime: str, download=False):
@@ -864,20 +505,15 @@ def create_gif(user):
     upload_key = request.form.get("uploadKey", "")
     if not upload or not re.fullmatch(r"[a-zA-Z0-9-]{8,80}", upload_key):
         return error("GIF upload is incomplete.")
-    try:
-        tags = normalize_tags(json.loads(request.form.get("tags", "[]")))
-        group_ids = normalize_group_ids(json.loads(request.form.get("groupIds", "[]")), user["id"])
-    except (ValueError, TypeError):
-        return error("Tags or groups are invalid.")
-    if tags is None or group_ids is None:
-        return error("Tags or groups are invalid.")
+    if request.form.get("groupIds") not in (None, "[]"):
+        return error("Group sharing is no longer available.")
     db = get_db()
     existing = db.execute(
         "SELECT * FROM gifs WHERE owner_id = ? AND upload_key = ?",
         (user["id"], upload_key),
     ).fetchone()
     if existing:
-        return jsonify(gif=gif_payload(existing, user["id"]))
+        return jsonify(gif=gif_payload(existing))
     contents = upload.read(MAX_GIF_BYTES + 1)
     if len(contents) > MAX_GIF_BYTES:
         return error("GIF is too large (8 MB maximum).", 413)
@@ -910,48 +546,12 @@ def create_gif(user):
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (gif_id, user["id"], upload_key, len(contents), width, height, now()),
             )
-            db.executemany(
-                "INSERT INTO gif_tags(gif_id, tag) VALUES (?, ?)",
-                [(gif_id, tag) for tag in tags],
-            )
-            db.executemany(
-                "INSERT INTO gif_groups(gif_id, group_id) VALUES (?, ?)",
-                [(gif_id, group_id) for group_id in group_ids],
-            )
     except Exception:
         gif_path.unlink(missing_ok=True)
         poster_path.unlink(missing_ok=True)
         raise
     row = db.execute("SELECT * FROM gifs WHERE id = ?", (gif_id,)).fetchone()
-    return jsonify(gif=gif_payload(row, user["id"])), 201
-
-
-@app.patch("/api/gifs/<gif_id>")
-@login_required
-def edit_gif(user, gif_id):
-    db = get_db()
-    row = db.execute(
-        "SELECT * FROM gifs WHERE id = ? AND owner_id = ?", (gif_id, user["id"])
-    ).fetchone()
-    if not row:
-        return error("GIF unavailable.", 404)
-    body = json_body()
-    tags = normalize_tags(body.get("tags"))
-    group_ids = normalize_group_ids(body.get("groupIds"), user["id"])
-    if tags is None or group_ids is None:
-        return error("Tags or groups are invalid.")
-    with db:
-        db.execute("DELETE FROM gif_tags WHERE gif_id = ?", (gif_id,))
-        db.executemany(
-            "INSERT INTO gif_tags(gif_id, tag) VALUES (?, ?)",
-            [(gif_id, tag) for tag in tags],
-        )
-        db.execute("DELETE FROM gif_groups WHERE gif_id = ?", (gif_id,))
-        db.executemany(
-            "INSERT INTO gif_groups(gif_id, group_id) VALUES (?, ?)",
-            [(gif_id, group_id) for group_id in group_ids],
-        )
-    return jsonify(gif=gif_payload(row, user["id"]))
+    return jsonify(gif=gif_payload(row)), 201
 
 
 @app.delete("/api/gifs/<gif_id>")
@@ -970,60 +570,10 @@ def delete_gif(user, gif_id):
     return jsonify(deleted=True)
 
 
-@app.delete("/api/groups/<group_id>/gifs/<gif_id>")
-@login_required
-def remove_group_gif(user, group_id, gif_id):
-    group = group_row(user["id"], group_id)
-    if not group:
-        return error("Group unavailable.", 404)
-    row = get_db().execute(
-        "SELECT gifs.owner_id FROM gif_groups JOIN gifs ON gifs.id = gif_groups.gif_id "
-        "WHERE gif_groups.group_id = ? AND gif_groups.gif_id = ?",
-        (group_id, gif_id),
-    ).fetchone()
-    if not row:
-        return error("GIF unavailable in this group.", 404)
-    if group["role"] != "manager" and row["owner_id"] != user["id"]:
-        return error("Only the owner or a manager can remove this share.", 403)
-    with get_db():
-        get_db().execute(
-            "DELETE FROM gif_groups WHERE group_id = ? AND gif_id = ?", (group_id, gif_id)
-        )
-    return jsonify(removed=True)
-
-
-@app.patch("/api/me")
-@login_required
-def update_me(user):
-    display_name = str(json_body().get("displayName", "")).strip()
-    if not 1 <= len(display_name) <= 40:
-        return error("Display name must be 1–40 characters.")
-    with get_db():
-        get_db().execute(
-            "UPDATE users SET display_name = ? WHERE id = ?",
-            (display_name, user["id"]),
-        )
-    return jsonify(user={
-        "id": user["id"], "email": user["email"], "displayName": display_name
-    })
-
-
 @app.delete("/api/me")
 @login_required
 def delete_me(user):
     db = get_db()
-    sole = db.execute(
-        "SELECT groups.id, groups.name FROM groups JOIN memberships mine "
-        "ON mine.group_id = groups.id AND mine.user_id = ? AND mine.role = 'manager' "
-        "WHERE (SELECT COUNT(*) FROM memberships managers "
-        "WHERE managers.group_id = groups.id AND managers.role = 'manager') = 1",
-        (user["id"],),
-    ).fetchall()
-    if sole:
-        return jsonify(
-            error="Promote another manager or end these groups first.",
-            groups=[{"id": row["id"], "name": row["name"]} for row in sole],
-        ), 409
     gif_ids = [
         row["id"]
         for row in db.execute("SELECT id FROM gifs WHERE owner_id = ?", (user["id"],)).fetchall()

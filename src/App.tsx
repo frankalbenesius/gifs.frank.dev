@@ -1,4 +1,5 @@
 import {
+  Link,
   Navigate,
   NavLink,
   Route,
@@ -7,17 +8,9 @@ import {
 } from "react-router-dom";
 import type { ReactNode } from "react";
 import { useApp } from "./AppContext";
-import { SignIn, DisplayName } from "./Auth";
+import { SignIn } from "./Auth";
 import { Recorder } from "./Recorder";
-import { SaveGif, MyGifs, GifDetail } from "./Gifs";
-import {
-  Groups,
-  CreateGroup,
-  GroupDrawer,
-  GroupManage,
-  JoinGroup,
-} from "./Groups";
-import { Account } from "./Account";
+import { MyGifs, GifDetail } from "./Gifs";
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user } = useApp();
@@ -30,59 +23,61 @@ function RequireAuth({ children }: { children: ReactNode }) {
       />
     );
   }
-  if (!user.displayName && location.pathname !== "/display-name") {
-    return (
-      <Navigate
-        to={`/display-name?next=${encodeURIComponent(location.pathname + location.search)}`}
-        replace
-      />
-    );
-  }
   return children;
+}
+
+function LegacySaveRedirect() {
+  const location = useLocation();
+  const editId = new URLSearchParams(location.search).get("edit");
+  return (
+    <Navigate
+      to={editId ? `/gifs/${encodeURIComponent(editId)}` : "/?save=1"}
+      replace
+    />
+  );
+}
+
+function LegacyCollectionRedirect() {
+  const location = useLocation();
+  return <Navigate to={`/gifs${location.search}${location.hash}`} replace />;
+}
+
+function SiteHeader() {
+  return (
+    <header className="site-header">
+      <div className="site-header-inner">
+        <Link
+          className="site-logo"
+          to="/"
+          aria-label="gif urself, record a GIF"
+        >
+          gif urself
+        </Link>
+        <Link className="site-action" to="/">
+          Record a GIF
+        </Link>
+      </div>
+    </header>
+  );
 }
 
 function Shell() {
   const { user } = useApp();
   const location = useLocation();
-  const plain = ["/signin", "/display-name"].includes(location.pathname);
+  const plain = location.pathname === "/signin";
+  const collectionPage =
+    location.pathname === "/gifs" || location.pathname.startsWith("/gifs/");
+
   return (
     <div className="app-shell">
-      <header className="site-header">
-        <NavLink className="brand" to="/">
-          gif urself<span className="brand-dot">.</span>
-        </NavLink>
-        {!plain && (
-          <nav className="header-nav" aria-label="Main navigation">
-            <NavLink to="/">Record</NavLink>
-            {user && <NavLink to="/my-gifs">My GIFs</NavLink>}
-            {user && <NavLink to="/groups">Groups</NavLink>}
-            <NavLink to={user ? "/account" : "/signin"}>
-              {user ? "Account" : "Sign in"}
-            </NavLink>
-          </nav>
-        )}
-      </header>
+      {user && collectionPage && <SiteHeader />}
       <Routes>
         <Route path="/" element={<Recorder />} />
         <Route path="/signin" element={<SignIn />} />
+        <Route path="/save" element={<LegacySaveRedirect />} />
+        <Route path="/my-gifs" element={<LegacyCollectionRedirect />} />
         <Route
-          path="/display-name"
-          element={
-            <RequireAuth>
-              <DisplayName />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/save"
-          element={
-            <RequireAuth>
-              <SaveGif />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/my-gifs"
+          path="/gifs"
           element={
             <RequireAuth>
               <MyGifs />
@@ -98,53 +93,24 @@ function Shell() {
           }
         />
         <Route
-          path="/groups"
-          element={
-            <RequireAuth>
-              <Groups />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/groups/new"
-          element={
-            <RequireAuth>
-              <CreateGroup />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/groups/:groupId"
-          element={
-            <RequireAuth>
-              <GroupDrawer />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/groups/:groupId/manage"
-          element={
-            <RequireAuth>
-              <GroupManage />
-            </RequireAuth>
-          }
-        />
-        <Route path="/invite/:token" element={<JoinGroup />} />
-        <Route
           path="/account"
-          element={
-            <RequireAuth>
-              <Account />
-            </RequireAuth>
-          }
+          element={<Navigate to="/gifs#account" replace />}
         />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      {!plain && user && (
+      {!plain && user && !collectionPage && (
         <nav className="mobile-nav" aria-label="Mobile navigation">
           <NavLink to="/">Record</NavLink>
-          <NavLink to="/my-gifs">My GIFs</NavLink>
-          <NavLink to="/groups">Groups</NavLink>
+          <NavLink
+            to="/gifs"
+            className={({ isActive }) =>
+              isActive || location.pathname.startsWith("/gifs/")
+                ? "active"
+                : undefined
+            }
+          >
+            Saved GIFs
+          </NavLink>
         </nav>
       )}
     </div>

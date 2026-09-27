@@ -59,7 +59,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const savePending = useCallback(async (blob: Blob) => {
-    setPending(blob);
     try {
       await writePending(blob);
       setPendingWarning("");
@@ -67,6 +66,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setPendingWarning(
         "This GIF is only in this tab. Download it before leaving or reloading.",
       );
+    } finally {
+      setPending(blob);
     }
   }, []);
 

@@ -34,7 +34,7 @@ class FlowTest(unittest.TestCase):
         csrf = client.get("/api/session").json["csrf"]
         return client, {"X-CSRF-Token": csrf}
 
-    def account(self, email, name):
+    def account(self, email):
         client, headers = self.client()
         response = client.post("/api/auth/request-code", json={"email": email}, headers=headers)
         self.assertEqual(response.status_code, 200, response.json)
@@ -42,7 +42,7 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(entry["email"], email)
         response = client.post("/api/auth/verify", json={"email": email, "code": entry["code"]}, headers=headers)
         self.assertEqual(response.status_code, 200, response.json)
-        user = client.patch("/api/me", json={"displayName": name}, headers=headers).json["user"]
+        user = client.get("/api/session").json["user"]
         return client, headers, user
 
     def post(self, client, headers, path, data):
@@ -50,50 +50,34 @@ class FlowTest(unittest.TestCase):
         self.assertLess(response.status_code, 300, response.json)
         return response.json
 
-    def test_group_sharing_and_revocation(self):
-        owner, own_headers, owner_user = self.account("owner@example.com", "Owner")
-        friend, friend_headers, friend_user = self.account("friend@example.com", "Friend")
-        stranger, _, _ = self.account("stranger@example.com", "Stranger")
-        first = self.post(owner, own_headers, "/api/groups", {"name": "First"})["group"]
-        second = self.post(owner, own_headers, "/api/groups", {"name": "Second"})["group"]
-        first_invite = owner.get(f"/api/groups/{first['id']}/invite").json["invite"]["token"]
-        second_invite = owner.get(f"/api/groups/{second['id']}/invite").json["invite"]["token"]
-        self.assertEqual(stranger.get(f"/api/invites/{first_invite}").status_code, 200)
-        self.assertEqual(stranger.get(f"/api/groups/{first['id']}/gifs").status_code, 404)
-        self.post(friend, friend_headers, f"/api/invites/{first_invite}/join", {})
-        self.post(friend, friend_headers, f"/api/invites/{second_invite}/join", {})
-        roster = owner.get(f"/api/groups/{first['id']}/members").json["members"]
-        self.assertEqual(next(person for person in roster if person["id"] == friend_user["id"])["email"], "friend@example.com")
-        self.assertNotIn("email", friend.get(f"/api/groups/{first['id']}/members").json["members"][0])
-        response = owner.post("/api/gifs", data={"file": (sample_gif(), "reaction.gif"), "uploadKey": "unique-upload-123", "tags": json.dumps(["anger"]), "groupIds": json.dumps([first["id"], second["id"]])}, headers=own_headers)
+    def test_historical_group_shares_are_private(self):
+        owner, own_headers, owner_user = self.account("owner@example.com")
+        friend, _, friend_user = self.account("friend@example.com")
+        response = owner.post("/api/gifs", data={"file": (sample_gif(), "reaction.gif"), "uploadKey": "unique-upload-123"}, headers=own_headers)
         self.assertEqual(response.status_code, 201, response.json)
         gif = response.json["gif"]
-        self.assertEqual(len(owner.get("/api/gifs").json["gifs"]), 1)
-        self.assertEqual(friend.get(f"/api/groups/{first['id']}/random?tag=anger").json["gif"]["id"], gif["id"])
-        response = friend.get(gif["fileUrl"])
-        self.assertEqual(response.status_code, 200)
-        response.close()
-        self.assertEqual(stranger.get(gif["fileUrl"]).status_code, 404)
-        self.assertEqual(owner.patch(f"/api/groups/{first['id']}/members/{friend_user['id']}", json={"role": "manager"}, headers=own_headers).status_code, 200)
-        self.assertIn("email", friend.get(f"/api/groups/{first['id']}/members").json["members"][0])
-        self.assertEqual(friend.delete(f"/api/groups/{first['id']}/gifs/{gif['id']}", headers=friend_headers).status_code, 200)
-        response = friend.get(gif["fileUrl"])
-        self.assertEqual(response.status_code, 200)  # Still shared through Second.
-        response.close()
-        self.assertEqual(owner.delete(f"/api/groups/{second['id']}/members/{friend_user['id']}", headers=own_headers).status_code, 200)
+        with server.app.app_context():
+            db = server.get_db()
+            with db:
+                db.execute("INSERT INTO groups(id, name, created_at) VALUES (?, ?, ?)", ("old-group", "Old group", server.now()))
+                db.execute("INSERT INTO memberships(group_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)", ("old-group", owner_user["id"], "manager", server.now()))
+                db.execute("INSERT INTO memberships(group_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)", ("old-group", friend_user["id"], "member", server.now()))
+                db.execute("INSERT INTO gif_groups(gif_id, group_id) VALUES (?, ?)", (gif["id"], "old-group"))
+        legacy_upload = owner.post("/api/gifs", data={"file": (sample_gif(), "legacy.gif"), "uploadKey": "legacy-upload-123", "groupIds": json.dumps(["old-group"])}, headers=own_headers)
+        self.assertEqual(legacy_upload.status_code, 400)
+        self.assertEqual(owner.get("/api/groups").status_code, 404)
+        self.assertEqual(friend.get(f"/api/gifs/{gif['id']}").status_code, 404)
         self.assertEqual(friend.get(gif["fileUrl"]).status_code, 404)
-        response = owner.get(gif["fileUrl"])
-        self.assertEqual(response.status_code, 200)
-        response.close()
-        self.assertEqual(friend.post(f"/api/invites/{second_invite}/join", json={}, headers=friend_headers).status_code, 404)
-        self.assertEqual(owner_user["displayName"], "Owner")
+        self.assertEqual(friend.get(gif["posterUrl"]).status_code, 404)
+        self.assertEqual(owner.get(f"/api/gifs/{gif['id']}").status_code, 200)
+        self.assertEqual(owner.delete("/api/me", headers=own_headers).status_code, 200)
 
     def test_private_gif_and_csrf(self):
-        owner, headers, _ = self.account("private@example.com", "Private")
-        response = owner.post("/api/gifs", data={"file": (sample_gif(), "private.gif"), "uploadKey": "private-upload-123", "tags": "[]", "groupIds": "[]"}, headers=headers)
+        owner, headers, _ = self.account("private@example.com")
+        response = owner.post("/api/gifs", data={"file": (sample_gif(), "private.gif"), "uploadKey": "private-upload-123"}, headers=headers)
         self.assertEqual(response.status_code, 201, response.json)
         gif = response.json["gif"]
-        other, _, _ = self.account("other@example.com", "Other")
+        other, _, _ = self.account("other@example.com")
         self.assertEqual(other.get(gif["fileUrl"]).status_code, 404)
         self.assertEqual(other.get(gif["posterUrl"]).status_code, 404)
         self.assertEqual(owner.delete(f"/api/gifs/{gif['id']}").status_code, 403)
@@ -101,8 +85,8 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(owner.get(gif["fileUrl"]).status_code, 404)
 
     def test_shared_sign_in_keeps_existing_gifs(self):
-        owner, headers, existing = self.account("linked@example.com", "Linked")
-        response = owner.post("/api/gifs", data={"file": (sample_gif(), "linked.gif"), "uploadKey": "linked-upload", "tags": "[]", "groupIds": "[]"}, headers=headers)
+        owner, headers, existing = self.account("linked@example.com")
+        response = owner.post("/api/gifs", data={"file": (sample_gif(), "linked.gif"), "uploadKey": "linked-upload"}, headers=headers)
         self.assertEqual(response.status_code, 201, response.json)
         gif_id = response.json["gif"]["id"]
 
@@ -115,11 +99,11 @@ class FlowTest(unittest.TestCase):
 
         new_browser = server.app.test_client()
         with new_browser.session_transaction() as state:
-            state["return_to"] = "/my-gifs"
+            state["return_to"] = "/gifs"
         with patch.object(server, "OIDC_READY", True), patch.object(server, "OIDC_ISSUER", "https://auth.frank.dev/api/auth"), patch.object(server.oauth, "frank", IdentityProvider(), create=True):
             result = new_browser.get("/api/auth/oidc/callback")
         self.assertEqual(result.status_code, 302)
-        self.assertEqual(result.location, "/my-gifs")
+        self.assertEqual(result.location, "http://127.0.0.1:5173/gifs")
         self.assertEqual(new_browser.get("/api/session").json["user"]["id"], existing["id"])
         self.assertEqual(new_browser.get("/api/gifs").json["gifs"][0]["id"], gif_id)
 
